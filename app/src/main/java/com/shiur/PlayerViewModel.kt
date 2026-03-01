@@ -16,6 +16,9 @@ import kotlinx.coroutines.launch
 import android.content.Context
 import android.content.SharedPreferences
 import android.net.Uri
+import android.provider.OpenableColumns
+import java.io.File
+import java.io.FileOutputStream
 
 class PlayerViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application
@@ -65,7 +68,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         })
 
         viewModelScope.launch {
-            loadRawTracks()
+            refreshTracks()
             mutableMediaList.first { it.isNotEmpty() }
             val list = mutableMediaList.value
             if (savedIndex in list.indices) {
@@ -94,36 +97,134 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    private fun loadRawTracks() {
-        val names = listOf("track1", "track2", "emuna_bitahon1", "emuna_bitahon2")
-        val ids = names.mapNotNull { name ->
-            val id = app.resources.getIdentifier(name, "raw", app.packageName)
-            if (id != 0) id else null
-        }
-        val entries = ids.map { resId ->
-            val retriever = MediaMetadataRetriever()
-            val resourceUri = Uri.parse("android.resource://${app.packageName}/$resId")
-            try {
-                retriever.setDataSource(app, resourceUri)
-                val dur = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
-                val title = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE) ?: names[ids.indexOf(resId)]
-                val art = app.resources.getIdentifier("ic_launcher_foreground", "mipmap", app.packageName)
-                MediaEntry(resId, title, dur, art)
-            } catch (e: Exception) {
-                val art = app.resources.getIdentifier("ic_launcher_foreground", "mipmap", app.packageName)
-                MediaEntry(resId, names[ids.indexOf(resId)], 0L, art)
-            } finally {
-                retriever.release()
-            }
-        }
-        mutableMediaList.value = entries
-        if (entries.isNotEmpty()) {
-            val mediaItems = entries.map { entry ->
-                MediaItem.fromUri(Uri.parse("android.resource://${app.packageName}/${entry.resId}"))
+    fun refreshTracks() {
+        viewModelScope.launch {
+            val rawEntries = loadRawTracks()
+            val internalEntries = loadInternalTracks()
+            val allEntries = (rawEntries + internalEntries).sortedBy { it.title }
+            
+            mutableMediaList.value = allEntries
+            
+            val mediaItems = allEntries.map { entry ->
+                if (entry.resId != null) {
+                    MediaItem.fromUri(Uri.parse("android.resource://${app.packageName}/${entry.resId}"))
+                } else {
+                    MediaItem.fromUri(entry.uri!!)
+                }
             }
             player.setMediaItems(mediaItems)
             player.prepare()
         }
+    }
+
+    private fun loadRawTracks(): List<MediaEntry> {
+        val rawFields = try {
+            R.raw::class.java.fields
+        } catch (e: Exception) {
+            emptyArray()
+        }
+
+        return rawFields.mapNotNull { field ->
+            try {
+                val resId = field.getInt(null)
+                val originalName = field.name
+                val retriever = MediaMetadataRetriever()
+                val resourceUri = Uri.parse("android.resource://${app.packageName}/$resId")
+                
+                retriever.setDataSource(app, resourceUri)
+                val dur = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+                var title = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE)
+                
+                if (title.isNullOrBlank()) {
+                    title = originalName.replace("_", " ")
+                        .split(" ")
+                        .joinToString(" ") { it.replaceFirstChar { char -> if (char.isLowerCase()) char.titlecase() else char.toString() } }
+                }
+                
+                val art = app.resources.getIdentifier("ic_launcher_foreground", "mipmap", app.packageName)
+                retriever.release()
+                MediaEntry(title = title, durationMs = dur, artResId = art, resId = resId)
+            } catch (e: Exception) {
+                null
+            }
+        }
+    }
+
+    private fun loadInternalTracks(): List<MediaEntry> {
+        val filesDir = app.filesDir
+        val audioFiles = filesDir.listFiles { file ->
+            file.extension.lowercase() in listOf("mp3", "m4a", "wav", "mp4", "ogg", "aac", "amr")
+        } ?: emptyArray()
+
+        return audioFiles.mapNotNull { file ->
+            try {
+                val retriever = MediaMetadataRetriever()
+                val uri = Uri.fromFile(file)
+                retriever.setDataSource(app, uri)
+                val dur = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+                var title = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE)
+                
+                if (title.isNullOrBlank()) {
+                    title = file.nameWithoutExtension.replace("_", " ")
+                        .split(" ")
+                        .joinToString(" ") { it.replaceFirstChar { char -> if (char.isLowerCase()) char.titlecase() else char.toString() } }
+                }
+                
+                val art = app.resources.getIdentifier("ic_launcher_foreground", "mipmap", app.packageName)
+                retriever.release()
+                MediaEntry(title = title, durationMs = dur, artResId = art, uri = uri)
+            } catch (e: Exception) {
+                null
+            }
+        }
+    }
+
+    fun importFile(uri: Uri) {
+        viewModelScope.launch {
+            try {
+                val fileName = getFileName(uri) ?: "imported_track_${System.currentTimeMillis()}"
+                val destinationFile = File(app.filesDir, fileName)
+                
+                app.contentResolver.openInputStream(uri)?.use { inputStream ->
+                    FileOutputStream(destinationFile).use { outputStream ->
+                        inputStream.copyTo(outputStream)
+                    }
+                }
+                refreshTracks()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
+    fun deleteMediaEntry(mediaEntry: MediaEntry) {
+        viewModelScope.launch {
+            if (mediaEntry.uri != null) { // Only delete if it's an imported file
+                try {
+                    val file = File(mediaEntry.uri.path!!)
+                    if (file.exists()) {
+                        file.delete()
+                    }
+                    refreshTracks() // Refresh the list after deletion
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+        }
+    }
+
+    private fun getFileName(uri: Uri): String? {
+        var name: String? = null
+        val cursor = app.contentResolver.query(uri, null, null, null, null)
+        cursor?.use {
+            if (it.moveToFirst()) {
+                val nameIndex = it.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (nameIndex != -1) {
+                    name = it.getString(nameIndex)
+                }
+            }
+        }
+        return name
     }
 
     fun play() {
