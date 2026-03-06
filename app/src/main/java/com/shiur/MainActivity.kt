@@ -29,6 +29,9 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Spacer
@@ -69,9 +72,18 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
 import androidx.core.content.ContextCompat
+import android.os.StatFs
+import android.os.Environment
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.File
 
 class MainActivity : ComponentActivity() {
     private val viewModel: PlayerViewModel by viewModels()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -83,11 +95,63 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        // Handle shared files from other apps (like WhatsApp)
+        handleIncomingIntent(intent)
+
         setContent {
             Surface(color = MaterialTheme.colors.background) {
                 AppRoot(viewModel)
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleIncomingIntent(intent)
+    }
+
+    private fun handleIncomingIntent(intent: Intent?) {
+        when (intent?.action) {
+            Intent.ACTION_SEND -> {
+                // Handle single file shared from another app
+                val uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    intent.getParcelableExtra(Intent.EXTRA_STREAM, android.net.Uri::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getParcelableExtra<android.net.Uri>(Intent.EXTRA_STREAM)
+                }
+                uri?.let { handleSharedFile(it) }
+            }
+            Intent.ACTION_VIEW -> {
+                // Handle "Open with" from file managers
+                intent.data?.let { uri ->
+                    handleSharedFile(uri)
+                }
+            }
+        }
+    }
+
+    private fun handleSharedFile(uri: android.net.Uri) {
+        try {
+            // Try to take persistable permission
+            contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
+        } catch (e: SecurityException) {
+            // If we can't get persistent permission, we'll still try to import
+            // (it might work for the current session)
+        }
+
+        // Import the file to the player
+        viewModel.importFile(uri)
+
+        // Show confirmation to user
+        Toast.makeText(
+            this,
+            "Media file received and added to playlist",
+            Toast.LENGTH_SHORT
+        ).show()
     }
 }
 
@@ -99,6 +163,101 @@ fun AppRoot(viewModel: PlayerViewModel) {
     val list by viewModel.mediaList.collectAsState()
     val current by viewModel.currentIndex.collectAsState()
     val context = LocalContext.current
+
+    // Storage information state
+    var appSize by remember { mutableStateOf("...") }
+    var freeSpace by remember { mutableStateOf("...") }
+    val scope = rememberCoroutineScope()
+
+    // Calculate storage info
+    LaunchedEffect(Unit) {
+        scope.launch {
+            withContext(Dispatchers.IO) {
+                try {
+                    // Calculate app size
+                    val dataDir = context.dataDir
+                    val cacheDir = context.cacheDir
+                    var totalSize = 0L
+
+                    fun getDirSize(dir: File): Long {
+                        var size = 0L
+                        dir.listFiles()?.forEach { file ->
+                            size += if (file.isDirectory) getDirSize(file) else file.length()
+                        }
+                        return size
+                    }
+
+                    totalSize = getDirSize(dataDir) + getDirSize(cacheDir)
+
+                    appSize = when {
+                        totalSize >= 1024 * 1024 * 1024 -> String.format("%.2f GB", totalSize / (1024.0 * 1024.0 * 1024.0))
+                        totalSize >= 1024 * 1024 -> String.format("%.2f MB", totalSize / (1024.0 * 1024.0))
+                        totalSize >= 1024 -> String.format("%.2f KB", totalSize / 1024.0)
+                        else -> "$totalSize B"
+                    }
+
+                    // Calculate free space
+                    val stat = StatFs(Environment.getDataDirectory().path)
+                    val availableBytes = stat.availableBlocksLong * stat.blockSizeLong
+
+                    freeSpace = when {
+                        availableBytes >= 1024 * 1024 * 1024 -> String.format("%.2f GB", availableBytes / (1024.0 * 1024.0 * 1024.0))
+                        availableBytes >= 1024 * 1024 -> String.format("%.2f MB", availableBytes / (1024.0 * 1024.0))
+                        availableBytes >= 1024 -> String.format("%.2f KB", availableBytes / 1024.0)
+                        else -> "$availableBytes B"
+                    }
+                } catch (e: Exception) {
+                    appSize = "N/A"
+                    freeSpace = "N/A"
+                }
+            }
+        }
+    }
+
+    // Recalculate when media list changes
+    LaunchedEffect(list.size) {
+        scope.launch {
+            withContext(Dispatchers.IO) {
+                try {
+                    // Calculate app size
+                    val dataDir = context.dataDir
+                    val cacheDir = context.cacheDir
+                    var totalSize = 0L
+
+                    fun getDirSize(dir: File): Long {
+                        var size = 0L
+                        dir.listFiles()?.forEach { file ->
+                            size += if (file.isDirectory) getDirSize(file) else file.length()
+                        }
+                        return size
+                    }
+
+                    totalSize = getDirSize(dataDir) + getDirSize(cacheDir)
+
+                    appSize = when {
+                        totalSize >= 1024 * 1024 * 1024 -> String.format("%.2f GB", totalSize / (1024.0 * 1024.0 * 1024.0))
+                        totalSize >= 1024 * 1024 -> String.format("%.2f MB", totalSize / (1024.0 * 1024.0))
+                        totalSize >= 1024 -> String.format("%.2f KB", totalSize / 1024.0)
+                        else -> "$totalSize B"
+                    }
+
+                    // Calculate free space
+                    val stat = StatFs(Environment.getDataDirectory().path)
+                    val availableBytes = stat.availableBlocksLong * stat.blockSizeLong
+
+                    freeSpace = when {
+                        availableBytes >= 1024 * 1024 * 1024 -> String.format("%.2f GB", availableBytes / (1024.0 * 1024.0 * 1024.0))
+                        availableBytes >= 1024 * 1024 -> String.format("%.2f MB", availableBytes / (1024.0 * 1024.0))
+                        availableBytes >= 1024 -> String.format("%.2f KB", availableBytes / 1024.0)
+                        else -> "$availableBytes B"
+                    }
+                } catch (e: Exception) {
+                    appSize = "N/A"
+                    freeSpace = "N/A"
+                }
+            }
+        }
+    }
 
     // Permission launcher for storage access
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -129,35 +288,44 @@ fun AppRoot(viewModel: PlayerViewModel) {
     }
 
     CompositionLocalProvider(LocalLayoutDirection provides if (Locale.getDefault().layoutDirection == android.util.LayoutDirection.RTL) LayoutDirection.Rtl else LayoutDirection.Ltr) {
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(MaterialTheme.colors.background)
-                .padding(16.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            item {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            Icons.Filled.Album,
-                            contentDescription = "Record",
-                            modifier = Modifier
-                                .size(48.dp) // Smaller icon for the title row
-                                .padding(end = 8.dp),
-                            tint = MaterialTheme.colors.primary
-                        )
-                        Text(
-                            "Shiur Player",
-                            style = MaterialTheme.typography.h6,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                    IconButton(onClick = { 
+        Box(modifier = Modifier.fillMaxSize()) {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(MaterialTheme.colors.background)
+                    .padding(16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                item {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                Icons.Filled.Album,
+                                contentDescription = "Record",
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .padding(end = 8.dp),
+                                tint = MaterialTheme.colors.primary
+                            )
+                            Column {
+                                Text(
+                                    "Shiur Player",
+                                    style = MaterialTheme.typography.h6,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    "App: $appSize | Free: $freeSpace",
+                                    style = MaterialTheme.typography.caption,
+                                    color = Color.Gray
+                                )
+                            }
+                        }
+                        // System file picker button (Plus button)
+                        IconButton(onClick = {
                         // Check permission first for Android 12 and below
                         if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.S_V2) {
                             if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_EXTERNAL_STORAGE)
@@ -168,29 +336,34 @@ fun AppRoot(viewModel: PlayerViewModel) {
                         }
 
                         try {
-                            // Create a very basic intent that works on most systems
-                            val intent = Intent(Intent.ACTION_GET_CONTENT)
+                            // Use ACTION_PICK which QuickPic handles well
+                            val intent = Intent(Intent.ACTION_PICK)
+                            // Use wildcard to let QuickPic show all media
                             intent.type = "*/*"
-                            intent.addCategory(Intent.CATEGORY_OPENABLE)
 
-                            // Check if there's an activity that can handle this
-                            val packageManager = context.packageManager
-                            if (intent.resolveActivity(packageManager) != null) {
-                                Toast.makeText(context, "Opening file picker...", Toast.LENGTH_SHORT).show()
+                            // Specify supported MIME types including audio
+                            val mimeTypes = arrayOf(
+                                "audio/*",
+                                "video/*",
+                                "image/*"
+                            )
+                            intent.putExtra(Intent.EXTRA_MIME_TYPES, mimeTypes)
+
+                            launcher.launch(intent)
+                        } catch (e: ActivityNotFoundException) {
+                            // Fallback to GET_CONTENT if PICK doesn't work
+                            try {
+                                val intent = Intent(Intent.ACTION_GET_CONTENT)
+                                intent.addCategory(Intent.CATEGORY_OPENABLE)
+                                intent.type = "*/*"
+                                val mimeTypes = arrayOf("audio/*", "video/*", "image/*")
+                                intent.putExtra(Intent.EXTRA_MIME_TYPES, mimeTypes)
                                 launcher.launch(intent)
-                            } else {
-                                // No file picker found, try alternate approach
-                                Toast.makeText(context, "Trying alternate file picker...", Toast.LENGTH_SHORT).show()
-                                val altIntent = Intent(Intent.ACTION_PICK)
-                                altIntent.type = "*/*"
-                                if (altIntent.resolveActivity(packageManager) != null) {
-                                    launcher.launch(altIntent)
-                                } else {
-                                    Toast.makeText(context, "No file manager found on this system. Please install a file manager app.", Toast.LENGTH_LONG).show()
-                                }
+                            } catch (e2: Exception) {
+                                Toast.makeText(context, "No file picker found: ${e2.message}", Toast.LENGTH_LONG).show()
                             }
                         } catch (e: Exception) {
-                            Toast.makeText(context, "Error opening file picker: ${e.message}", Toast.LENGTH_LONG).show()
+                            Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_LONG).show()
                         }
                     }) {
                         Icon(
@@ -200,9 +373,9 @@ fun AppRoot(viewModel: PlayerViewModel) {
                             tint = MaterialTheme.colors.primary
                         )
                     }
+                    }
+                    Spacer(modifier = Modifier.height(16.dp)) // Spacer after the title row
                 }
-                Spacer(modifier = Modifier.height(16.dp)) // Spacer after the title row
-            }
             item {
                  AndroidView(
                     factory = { context ->
@@ -360,6 +533,7 @@ fun AppRoot(viewModel: PlayerViewModel) {
                     }
                 }
             }
+        }
         }
     }
 }
