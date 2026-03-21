@@ -71,11 +71,13 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             refreshTracks()
             mutableMediaList.first { it.isNotEmpty() }
             val list = mutableMediaList.value
-            if (savedIndex in list.indices) {
-                mutableCurrentIndex.value = savedIndex
-                player.seekTo(savedIndex, savedPos)
-                player.prepare()
-            }
+            val startIndex = if (savedIndex in list.indices) savedIndex else 0
+
+            mutableCurrentIndex.value = startIndex
+            player.seekTo(startIndex, savedPos.coerceAtLeast(0L))
+            player.prepare()
+            player.playWhenReady = true
+            player.play()
         }
 
         viewModelScope.launch {

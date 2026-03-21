@@ -81,6 +81,43 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 
+private data class StorageInfo(
+    val appSize: String,
+    val freeSpace: String
+)
+
+private fun formatBytes(bytes: Long): String {
+    return when {
+        bytes >= 1024L * 1024L * 1024L -> String.format("%.2f GB", bytes / (1024.0 * 1024.0 * 1024.0))
+        bytes >= 1024L * 1024L -> String.format("%.2f MB", bytes / (1024.0 * 1024.0))
+        bytes >= 1024L -> String.format("%.2f KB", bytes / 1024.0)
+        else -> "$bytes B"
+    }
+}
+
+private fun getDirSize(dir: File): Long {
+    var size = 0L
+    dir.listFiles()?.forEach { file ->
+        size += if (file.isDirectory) getDirSize(file) else file.length()
+    }
+    return size
+}
+
+private fun calculateStorageInfo(context: android.content.Context): StorageInfo {
+    return try {
+        val totalSize = getDirSize(context.dataDir) + getDirSize(context.cacheDir)
+        val stat = StatFs(Environment.getDataDirectory().path)
+        val availableBytes = stat.availableBlocksLong * stat.blockSizeLong
+
+        StorageInfo(
+            appSize = formatBytes(totalSize),
+            freeSpace = formatBytes(availableBytes)
+        )
+    } catch (e: Exception) {
+        StorageInfo(appSize = "N/A", freeSpace = "N/A")
+    }
+}
+
 class MainActivity : ComponentActivity() {
     private val viewModel: PlayerViewModel by viewModels()
 
@@ -169,93 +206,12 @@ fun AppRoot(viewModel: PlayerViewModel) {
     var freeSpace by remember { mutableStateOf("...") }
     val scope = rememberCoroutineScope()
 
-    // Calculate storage info
-    LaunchedEffect(Unit) {
-        scope.launch {
-            withContext(Dispatchers.IO) {
-                try {
-                    // Calculate app size
-                    val dataDir = context.dataDir
-                    val cacheDir = context.cacheDir
-                    var totalSize = 0L
-
-                    fun getDirSize(dir: File): Long {
-                        var size = 0L
-                        dir.listFiles()?.forEach { file ->
-                            size += if (file.isDirectory) getDirSize(file) else file.length()
-                        }
-                        return size
-                    }
-
-                    totalSize = getDirSize(dataDir) + getDirSize(cacheDir)
-
-                    appSize = when {
-                        totalSize >= 1024 * 1024 * 1024 -> String.format("%.2f GB", totalSize / (1024.0 * 1024.0 * 1024.0))
-                        totalSize >= 1024 * 1024 -> String.format("%.2f MB", totalSize / (1024.0 * 1024.0))
-                        totalSize >= 1024 -> String.format("%.2f KB", totalSize / 1024.0)
-                        else -> "$totalSize B"
-                    }
-
-                    // Calculate free space
-                    val stat = StatFs(Environment.getDataDirectory().path)
-                    val availableBytes = stat.availableBlocksLong * stat.blockSizeLong
-
-                    freeSpace = when {
-                        availableBytes >= 1024 * 1024 * 1024 -> String.format("%.2f GB", availableBytes / (1024.0 * 1024.0 * 1024.0))
-                        availableBytes >= 1024 * 1024 -> String.format("%.2f MB", availableBytes / (1024.0 * 1024.0))
-                        availableBytes >= 1024 -> String.format("%.2f KB", availableBytes / 1024.0)
-                        else -> "$availableBytes B"
-                    }
-                } catch (e: Exception) {
-                    appSize = "N/A"
-                    freeSpace = "N/A"
-                }
-            }
-        }
-    }
-
     // Recalculate when media list changes
-    LaunchedEffect(list.size) {
+    LaunchedEffect(Unit, list.size) {
         scope.launch {
-            withContext(Dispatchers.IO) {
-                try {
-                    // Calculate app size
-                    val dataDir = context.dataDir
-                    val cacheDir = context.cacheDir
-                    var totalSize = 0L
-
-                    fun getDirSize(dir: File): Long {
-                        var size = 0L
-                        dir.listFiles()?.forEach { file ->
-                            size += if (file.isDirectory) getDirSize(file) else file.length()
-                        }
-                        return size
-                    }
-
-                    totalSize = getDirSize(dataDir) + getDirSize(cacheDir)
-
-                    appSize = when {
-                        totalSize >= 1024 * 1024 * 1024 -> String.format("%.2f GB", totalSize / (1024.0 * 1024.0 * 1024.0))
-                        totalSize >= 1024 * 1024 -> String.format("%.2f MB", totalSize / (1024.0 * 1024.0))
-                        totalSize >= 1024 -> String.format("%.2f KB", totalSize / 1024.0)
-                        else -> "$totalSize B"
-                    }
-
-                    // Calculate free space
-                    val stat = StatFs(Environment.getDataDirectory().path)
-                    val availableBytes = stat.availableBlocksLong * stat.blockSizeLong
-
-                    freeSpace = when {
-                        availableBytes >= 1024 * 1024 * 1024 -> String.format("%.2f GB", availableBytes / (1024.0 * 1024.0 * 1024.0))
-                        availableBytes >= 1024 * 1024 -> String.format("%.2f MB", availableBytes / (1024.0 * 1024.0))
-                        availableBytes >= 1024 -> String.format("%.2f KB", availableBytes / 1024.0)
-                        else -> "$availableBytes B"
-                    }
-                } catch (e: Exception) {
-                    appSize = "N/A"
-                    freeSpace = "N/A"
-                }
-            }
+            val info = withContext(Dispatchers.IO) { calculateStorageInfo(context) }
+            appSize = info.appSize
+            freeSpace = info.freeSpace
         }
     }
 
